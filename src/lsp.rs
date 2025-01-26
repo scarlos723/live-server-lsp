@@ -413,17 +413,20 @@ pub async fn lsp() {
 }
 
 pub fn get_byte_index_from_position(s: &str, position: Position) -> usize {
-    if s.len() == 0 {
+    if s.is_empty() {
         return 0;
     }
+
     let line_start = index_of_first_char_in_line(s, position.line).unwrap_or(s.len());
 
     let char_index = line_start + position.character as usize;
 
-    if char_index >= s.len() {
-        s.char_indices().nth(s.len() - 1).unwrap().0
+    let char_count = s.chars().count();
+
+    if char_index >= char_count {
+        s.char_indices().last().map(|(i, _)| i).unwrap_or(0)
     } else {
-        s.char_indices().nth(char_index).unwrap().0
+        s.char_indices().nth(char_index).map(|(i, _)| i).unwrap_or(s.len())
     }
 }
 
