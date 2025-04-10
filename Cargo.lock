@@ -502,7 +502,7 @@ checksum = "23fb14cb19457329c82206317a5663005a4d404783dc74f4252769b0d5f42856"
 
 [[package]]
 name = "live-server-lsp"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "rusty-live-server",
  "serde",
@@ -715,8 +715,8 @@ checksum = "719b953e2095829ee67db738b3bfa9fa368c94900df327b3f07fe6e794d2fe1f"
 
 [[package]]
 name = "rusty-live-server"
-version = "0.5.2"
-source = "git+https://github.com/frederik-uni/rusty-live-server#0d6193cc18f27c3456459b99457d02f89654d6f8"
+version = "0.5.3"
+source = "git+https://github.com/frederik-uni/rusty-live-server#223eb8b14c0ffaced3f7c34b3429fd31e8dfa65e"
 dependencies = [
  "base64",
  "mime_guess",
