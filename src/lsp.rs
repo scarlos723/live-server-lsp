@@ -13,7 +13,7 @@ use tower_lsp::lsp_types::{
     DidSaveTextDocumentParams, ExecuteCommandParams, InitializeParams, InitializeResult,
     InitializedParams, MessageType, Position, SaveOptions, ServerCapabilities,
     TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions,
-    TextDocumentSyncSaveOptions,
+    TextDocumentSyncSaveOptions, Url,
 };
 
 use tower_lsp::{Client, LanguageServer, LspService, Server};
@@ -34,7 +34,7 @@ struct LspFileService {
     eager: bool,
     port: Arc<Mutex<u16>>,
     root: Arc<PathBuf>,
-    files: Arc<Mutex<HashMap<String, String>>>,
+    files: Arc<Mutex<HashMap<PathBuf, String>>>,
     sig: Signal,
 }
 
@@ -49,18 +49,14 @@ enum LspFile {
 
 impl LspFile {
     async fn new(
-        files: Arc<Mutex<HashMap<String, String>>>,
+        files: Arc<Mutex<HashMap<PathBuf, String>>>,
         path: &Path,
         eager: bool,
     ) -> Result<Self, Error> {
         if !eager {
             return Ok(LspFile::File(TokioFile::open(path).await?));
         }
-        let content = files
-            .lock()
-            .await
-            .get(&format!("file://{}", path.to_str().unwrap_or_default()))
-            .cloned();
+        let content = files.lock().await.get(path).cloned();
         Ok(match content {
             Some(v) => LspFile::Content(v.to_string()),
             None => LspFile::File(TokioFile::open(path).await?),
@@ -95,11 +91,11 @@ impl Dir for LspDir {
 }
 
 impl FileSystemInterface for LspFileService {
-    async fn get_dir(&self, path: &Path) -> Result<impl Dir, rusty_live_server::Error> {
+    async fn get_dir(&self, path: &Path) -> Result<impl Dir, Error> {
         LspDir::new(path).await
     }
 
-    async fn get_file(&self, path: &Path) -> Result<impl File, rusty_live_server::Error> {
+    async fn get_file(&self, path: &Path) -> Result<impl File, Error> {
         LspFile::new(self.files.clone(), path, self.eager).await
     }
 }
@@ -107,33 +103,42 @@ impl FileSystemInterface for LspFileService {
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
-        let uri = params.text_document.uri.to_string();
+        let uri = params.text_document.uri;
+        let Some(file_path) = self.uri_to_file_path(&uri).await else {
+            return;
+        };
         let content = params.text_document.text;
 
-        if let Some((_, service)) = self.get_workspace_for_file(&uri).await {
+        if let Some((_, service)) = self.get_workspace_for_file(&file_path).await {
             let mut files = service.files.lock().await;
             if *self.eager.read().await {
-                files.insert(uri.clone(), content.clone());
+                files.insert(file_path.clone(), content.clone());
             }
-            self.update_file(&uri, &service, false).await;
+            self.update_file(&file_path, &service, false).await;
         }
     }
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
-        let uri = params.text_document.uri.to_string();
-        if let Some((_, service)) = self.get_workspace_for_file(&uri).await {
+        let uri = params.text_document.uri;
+        let Some(file_path) = self.uri_to_file_path(&uri).await else {
+            return;
+        };
+        if let Some((_, service)) = self.get_workspace_for_file(&file_path).await {
             let message = format!("File saved: {}", uri);
             self.client.log_message(MessageType::INFO, message).await;
-            self.update_file(&uri, &service, true).await;
+            self.update_file(&file_path, &service, true).await;
         }
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
-        let uri = params.text_document.uri.to_string();
+        let uri = params.text_document.uri;
+        let Some(file_path) = self.uri_to_file_path(&uri).await else {
+            return;
+        };
 
-        if let Some((_, service)) = self.get_workspace_for_file(&uri).await {
+        if let Some((_, service)) = self.get_workspace_for_file(&file_path).await {
             let mut files = service.files.lock().await;
-            if let Some(file) = files.get_mut(&uri) {
+            if let Some(file) = files.get_mut(&file_path) {
                 if *self.eager.read().await {
                     for change in params.content_changes {
                         if let Some(range) = change.range {
@@ -147,7 +152,7 @@ impl LanguageServer for Backend {
                     }
                 }
             }
-            self.update_file(&uri, &service, false).await;
+            self.update_file(&file_path, &service, false).await;
         }
     }
 
@@ -276,15 +281,15 @@ impl LanguageServer for Backend {
     ) -> tower_lsp::jsonrpc::Result<Option<CodeActionResponse>> {
         let mut actions = vec![];
 
-        let uri = params.text_document.uri.to_string();
+        let uri = params.text_document.uri;
+        let Some(file_path) = self.uri_to_file_path(&uri).await else {
+            return Err(tower_lsp::jsonrpc::Error::invalid_params(
+                "URL argument invalid",
+            ));
+        };
 
-        if let Some((_, service)) = self.get_workspace_for_file(&uri).await {
+        if let Some((_, service)) = self.get_workspace_for_file(&file_path).await {
             let port = *service.port.lock().await;
-            let file = uri.strip_prefix("file://").unwrap_or(&uri);
-            let file = file
-                .strip_prefix(service.root.to_str().unwrap_or_default())
-                .unwrap_or(file);
-            let file = file.strip_prefix("/").unwrap_or(file);
             let action = CodeActionOrCommand::CodeAction(CodeAction {
                 title: format!("Open in Browser({})", port),
                 kind: Some(CodeActionKind::EMPTY),
@@ -293,7 +298,7 @@ impl LanguageServer for Backend {
                     command: "openProjectWeb".to_string(),
                     arguments: Some(vec![
                         Value::from(service.root.to_str().unwrap_or_default().to_string()),
-                        Value::from(file),
+                        Value::from(file_path.to_str().unwrap_or_default().to_string()),
                     ]),
                 }),
                 edit: None,
@@ -343,11 +348,14 @@ impl LanguageServer for Backend {
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
-        let uri = params.text_document.uri.to_string();
+        let uri = params.text_document.uri;
+        let Some(file_path) = self.uri_to_file_path(&uri).await else {
+            return;
+        };
 
-        if let Some((_, service)) = self.get_workspace_for_file(&uri).await {
+        if let Some((_, service)) = self.get_workspace_for_file(&file_path).await {
             let mut files = service.files.lock().await;
-            files.remove(&uri);
+            files.remove(&file_path);
         }
     }
 
@@ -358,10 +366,22 @@ impl LanguageServer for Backend {
 }
 
 impl Backend {
-    async fn get_workspace_for_file(&self, uri: &str) -> Option<(PathBuf, LspFileService)> {
+    async fn uri_to_file_path(&self, uri: &Url) -> Option<PathBuf> {
+        let Ok(file_path) = uri.to_file_path() else {
+            self.client
+                .log_message(
+                    MessageType::ERROR,
+                    format!("Could not convert URI to file path: {}", uri.to_string()),
+                )
+                .await;
+            return None;
+        };
+        Some(file_path)
+    }
+
+    async fn get_workspace_for_file(&self, file_path: &Path) -> Option<(PathBuf, LspFileService)> {
         let folders = self.workspace_folders.lock().await;
         for (path, (_, service)) in folders.iter() {
-            let file_path = Path::new(uri.strip_prefix("file://").unwrap_or(uri));
             if file_path.starts_with(&service.root.as_ref()) {
                 return Some((path.clone(), service.clone()));
             }
@@ -369,14 +389,16 @@ impl Backend {
         None
     }
 
-    async fn update_file(&self, uri: &str, service: &LspFileService, saved: bool) {
+    async fn update_file(&self, file_path: &Path, service: &LspFileService, saved: bool) {
         self.client
-            .log_message(MessageType::INFO, format!("File updated: {}", uri))
+            .log_message(
+                MessageType::INFO,
+                format!("File updated: {}", file_path.display()),
+            )
             .await;
-        let abs = uri.strip_prefix("file://").unwrap_or(uri);
-        let rel = abs
-            .strip_prefix(service.root.to_str().unwrap_or_default())
-            .unwrap_or(abs);
+        let rel = file_path
+            .strip_prefix(service.root.as_ref())
+            .unwrap_or(&file_path);
         self.call_custom_function(&service.root, Path::new(rel), saved)
             .await;
     }
@@ -426,7 +448,10 @@ pub fn get_byte_index_from_position(s: &str, position: Position) -> usize {
     if char_index >= char_count {
         s.char_indices().last().map(|(i, _)| i).unwrap_or(0)
     } else {
-        s.char_indices().nth(char_index).map(|(i, _)| i).unwrap_or(s.len())
+        s.char_indices()
+            .nth(char_index)
+            .map(|(i, _)| i)
+            .unwrap_or(s.len())
     }
 }
 
