@@ -381,8 +381,10 @@ impl Backend {
 
     async fn get_workspace_for_file(&self, file_path: &Path) -> Option<(PathBuf, LspFileService)> {
         let folders = self.workspace_folders.lock().await;
+        let canonicalized_file = canonicalize_path(file_path);
         for (path, (_, service)) in folders.iter() {
-            if file_path.starts_with(&service.root.as_ref()) {
+            let canonicalized_root = canonicalize_path(&service.root);
+            if canonicalized_file.starts_with(&canonicalized_root) {
                 return Some((path.clone(), service.clone()));
             }
         }
@@ -413,6 +415,16 @@ impl Backend {
         let mutex = self.workspace_folders.lock().await;
         if let Some((_, fs)) = mutex.get(workspace) {
             fs.sig.send_signal(file_path.to_path_buf());
+        }
+    }
+}
+
+fn canonicalize_path(path: &Path) -> PathBuf {
+    match path.canonicalize() {
+        Ok(canonical) => canonical,
+        Err(_) => {
+            // If for what ever reason fails return the path as-is
+            path.to_path_buf()
         }
     }
 }
