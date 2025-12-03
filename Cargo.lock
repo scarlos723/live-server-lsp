@@ -502,7 +502,7 @@ checksum = "23fb14cb19457329c82206317a5663005a4d404783dc74f4252769b0d5f42856"
 
 [[package]]
 name = "live-server-lsp"
-version = "0.3.11"
+version = "0.3.12"
 dependencies = [
  "rusty-live-server",
  "serde",
