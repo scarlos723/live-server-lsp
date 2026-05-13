@@ -290,6 +290,7 @@ impl LanguageServer for Backend {
 
         if let Some((_, service)) = self.get_workspace_for_file(&file_path).await {
             let port = *service.port.lock().await;
+            let relative_path = file_path.strip_prefix(&*service.root).unwrap_or(&file_path);
             let action = CodeActionOrCommand::CodeAction(CodeAction {
                 title: format!("Open in Browser({})", port),
                 kind: Some(CodeActionKind::EMPTY),
@@ -298,7 +299,7 @@ impl LanguageServer for Backend {
                     command: "openProjectWeb".to_string(),
                     arguments: Some(vec![
                         Value::from(service.root.to_str().unwrap_or_default().to_string()),
-                        Value::from(file_path.to_str().unwrap_or_default().to_string()),
+                        Value::from(relative_path.to_str().unwrap_or_default().to_string()),
                     ]),
                 }),
                 edit: None,
