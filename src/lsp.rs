@@ -167,6 +167,7 @@ impl LanguageServer for Backend {
                 args.next().and_then(|arg| arg.as_str()),
             ) {
                 if let Some((_, v)) = self.workspace_folders.lock().await.get(Path::new(project)) {
+                    let file = make_file_url_path(Path::new(project), Path::new(file));
                     if let Err(e) = webbrowser::open(&format!(
                         "http://127.0.0.1:{}/{file}",
                         v.port.lock().await
@@ -430,6 +431,44 @@ fn canonicalize_path(path: &Path) -> PathBuf {
     }
 }
 
+fn make_file_url_path(root: &Path, file_path: &Path) -> String {
+    let relative_path = file_path.strip_prefix(root).unwrap_or(file_path);
+    encode_url_path(relative_path)
+}
+
+fn encode_url_path(path: &Path) -> String {
+    path.components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(value) => Some(percent_encode_path_segment(
+                value.to_string_lossy().as_ref(),
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn percent_encode_path_segment(segment: &str) -> String {
+    let mut output = String::new();
+    for byte in segment.bytes() {
+        if matches!(
+            byte,
+            b'A'..=b'Z'
+                | b'a'..=b'z'
+                | b'0'..=b'9'
+                | b'-'
+                | b'.'
+                | b'_'
+                | b'~'
+        ) {
+            output.push(byte as char);
+        } else {
+            output.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    output
+}
+
 pub async fn lsp() {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
@@ -490,4 +529,36 @@ fn index_of_first_char_in_line(s: &str, line: u32) -> Option<usize> {
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn makes_relative_url_path_for_file_under_workspace() {
+        let root = Path::new(r"C:\Users\PC021\Desktop");
+        let file = Path::new(r"C:\Users\PC021\Desktop\index.html");
+
+        assert_eq!(make_file_url_path(root, file), "index.html");
+    }
+
+    #[test]
+    fn encodes_unicode_and_reserved_characters() {
+        let root = Path::new(r"C:\Users\PC021\Desktop");
+        let file = Path::new(r"C:\Users\PC021\Desktop\index_切圖_模板 #1.html");
+
+        assert_eq!(
+            make_file_url_path(root, file),
+            "index_%E5%88%87%E5%9C%96_%E6%A8%A1%E6%9D%BF%20%231.html"
+        );
+    }
+
+    #[test]
+    fn preserves_nested_relative_path_with_forward_slashes() {
+        let root = Path::new(r"C:\Users\PC021");
+        let file = Path::new(r"C:\Users\PC021\Desktop\demo file.html");
+
+        assert_eq!(make_file_url_path(root, file), "Desktop/demo%20file.html");
+    }
 }
